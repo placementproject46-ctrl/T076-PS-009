@@ -5,12 +5,12 @@ import java.math.BigDecimal;
 /**
  * Haircut classes:
  * GROUP_A: 10% haircut (collateral factor = 0.90)
- * GROUP_B: 20% haircut (collateral factor = 0.80)
+ * GROUP_B: 25% haircut (collateral factor = 0.75)
  * GROUP_C: 100% haircut (not pledgeable / nil collateral value)
  */
 public enum PledgeGroup {
     GROUP_A(new BigDecimal("0.10"), true),
-    GROUP_B(new BigDecimal("0.20"), true),
+    GROUP_B(new BigDecimal("0.25"), true),
     GROUP_C(new BigDecimal("1.00"), false);
 
     private final BigDecimal haircutRate;

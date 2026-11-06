@@ -14,6 +14,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -25,6 +27,8 @@ public class ReportService {
     private final StockPriceRepository stockPriceRepository;
     private final MarginService marginService;
 
+    private final List<EodRecord> eodRecords = new ArrayList<>();
+
     public ReportService(ClientRepository clientRepository,
                          OrderRepository orderRepository,
                          LedgerRepository ledgerRepository,
@@ -35,6 +39,16 @@ public class ReportService {
         this.ledgerRepository = ledgerRepository;
         this.stockPriceRepository = stockPriceRepository;
         this.marginService = marginService;
+    }
+
+    public void addEodRecord(EodRecord record) {
+        if (record != null) {
+            eodRecords.add(record);
+        }
+    }
+
+    public List<EodRecord> getEodRecords() {
+        return Collections.unmodifiableList(eodRecords);
     }
 
     public void writeOrderDecisionsCsv(Path outputPath) throws IOException {
@@ -54,6 +68,17 @@ public class ReportService {
             writer.newLine();
             for (ContractNote note : orderRepository.getContractNotes()) {
                 writer.write(note.toCsvRow());
+                writer.newLine();
+            }
+        }
+    }
+
+    public void writeEodReportCsv(Path outputPath) throws IOException {
+        try (BufferedWriter writer = Files.newBufferedWriter(outputPath, StandardCharsets.UTF_8)) {
+            writer.write("date,client_id,ledger_balance,collateral_value,intraday_mtm,usable_margin,used_margin,interest_charged,open_intraday_positions");
+            writer.newLine();
+            for (EodRecord record : eodRecords) {
+                writer.write(record.toCsvRow());
                 writer.newLine();
             }
         }
@@ -136,5 +161,9 @@ public class ReportService {
         sb.append("========================================================================================\n");
 
         return sb.toString();
+    }
+
+    public void clear() {
+        eodRecords.clear();
     }
 }

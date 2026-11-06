@@ -18,6 +18,8 @@ public class OrderExecutionService {
     private final ChargeCalculationService chargeCalculationService;
     private final MarginService marginService;
     private final OrderValidationService orderValidationService;
+    private SettlementService settlementService;
+    private IntradayService intradayService;
 
     public OrderExecutionService(ClientRepository clientRepository,
                                  OrderRepository orderRepository,
@@ -33,12 +35,19 @@ public class OrderExecutionService {
         this.orderValidationService = orderValidationService;
     }
 
+    public void setSettlementService(SettlementService settlementService) {
+        this.settlementService = settlementService;
+    }
+
+    public void setIntradayService(IntradayService intradayService) {
+        this.intradayService = intradayService;
+    }
+
     /**
      * Processes an order end-to-end:
-     * 1. Calculates required margin & available margin
-     * 2. Runs all business validations
-     * 3. If valid: executes, updates ledger and holdings, generates contract note
-     * 4. If invalid: rejects without modifying state, records rule IDs and reason
+     * 1. Evaluates all business validations according to strict precedence
+     * 2. If valid: executes state update, queues delivery or tracks intraday, generates contract note
+     * 3. If invalid: rejects without modifying state, records rule IDs and reason
      */
     public Order processOrder(Order order, LocalDate tradeDate) {
         Client client = clientRepository.findById(order.getClientId()).orElse(null);
@@ -51,9 +60,13 @@ public class OrderExecutionService {
                 ? marginService.calculateAvailableMargin(client, tradeDate, order.getProduct(), requiredMargin)
                 : BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP);
 
+        if (settlementService != null && client != null && order.getSide() == TransactionSide.BUY) {
+            BigDecimal sameDayCredit = settlementService.getAvailableSameDaySellProceeds(client.getClientId());
+            availableMargin = availableMargin.add(sameDayCredit).setScale(2, RoundingMode.HALF_UP);
+        }
+
         // Run all validations
         ValidationResult valResult = orderValidationService.validateOrder(order, tradeDate);
-
         ActionType action = order.getSide() == TransactionSide.BUY ? ActionType.BUY : ActionType.SELL;
 
         if (!valResult.isValid()) {
@@ -129,92 +142,58 @@ public class OrderExecutionService {
     private void executeOrderStateUpdate(Order order, Client client, LocalDate tradeDate, ChargesBreakdown charges) {
         if (client == null) return;
 
-        BigDecimal netAmount = charges.getNetAmount();
-        String entryId = ledgerRepository.nextEntryId();
-
         if (order.getProduct() == ProductType.DELIVERY) {
-            if (order.getSide() == TransactionSide.BUY) {
-                // Debit cash ledger by net amount (Trade Value + Charges)
-                client.debitCash(netAmount);
-                // Credit stock holding (add shares and update weighted average price)
-                client.addShares(order.getSymbol(), order.getQuantity(), order.getPrice());
-
-                LedgerEntry entry = new LedgerEntry(
-                        entryId,
-                        order.getTimestamp(),
-                        tradeDate,
-                        client.getClientId(),
-                        "DELIVERY_BUY",
-                        netAmount,
-                        BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
-                        client.getCashBalance(),
-                        String.format("BUY %d %s @ %s (Charges: %s)",
-                                order.getQuantity(), order.getSymbol(), order.getPrice(), charges.getTotalCharges()),
-                        order.getOrderId()
-                );
-                ledgerRepository.save(entry);
-
+            // Queue into T+1 settlement service
+            if (settlementService != null) {
+                settlementService.queueDeliveryOrder(order, tradeDate);
+                if (order.getSide() == TransactionSide.BUY) {
+                    // If using same-day sell proceeds, record the usage
+                    BigDecimal usableCredit = settlementService.getAvailableSameDaySellProceeds(client.getClientId());
+                    if (usableCredit.compareTo(BigDecimal.ZERO) > 0) {
+                        BigDecimal usedFromCredit = order.getTradeValue().min(usableCredit);
+                        settlementService.useSameDaySellProceeds(client.getClientId(), usedFromCredit);
+                    }
+                }
             } else {
-                // DELIVERY SELL
-                // Credit cash ledger by net amount (Trade Value - Charges)
-                client.creditCash(netAmount);
-                // Deduct stock holding
-                client.deductShares(order.getSymbol(), order.getQuantity());
-
-                LedgerEntry entry = new LedgerEntry(
-                        entryId,
-                        order.getTimestamp(),
-                        tradeDate,
-                        client.getClientId(),
-                        "DELIVERY_SELL",
-                        BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
-                        netAmount,
-                        client.getCashBalance(),
-                        String.format("SELL %d %s @ %s (Charges: %s)",
-                                order.getQuantity(), order.getSymbol(), order.getPrice(), charges.getTotalCharges()),
-                        order.getOrderId()
-                );
-                ledgerRepository.save(entry);
+                // Immediate settlement fallback (for standalone tests without settlement engine)
+                BigDecimal netAmount = charges.getNetAmount();
+                String entryId = ledgerRepository.nextEntryId();
+                if (order.getSide() == TransactionSide.BUY) {
+                    client.debitCash(netAmount);
+                    client.addShares(order.getSymbol(), order.getQuantity(), order.getPrice());
+                    ledgerRepository.save(new LedgerEntry(
+                            entryId, order.getTimestamp(), tradeDate, client.getClientId(), "DELIVERY_BUY",
+                            netAmount, BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP), client.getCashBalance(),
+                            String.format("BUY %d %s @ %s (Charges: %s)", order.getQuantity(), order.getSymbol(), order.getPrice(), charges.getTotalCharges()),
+                            order.getOrderId()
+                    ));
+                } else {
+                    client.creditCash(netAmount);
+                    client.deductShares(order.getSymbol(), order.getQuantity());
+                    ledgerRepository.save(new LedgerEntry(
+                            entryId, order.getTimestamp(), tradeDate, client.getClientId(), "DELIVERY_SELL",
+                            BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP), netAmount, client.getCashBalance(),
+                            String.format("SELL %d %s @ %s (Charges: %s)", order.getQuantity(), order.getSymbol(), order.getPrice(), charges.getTotalCharges()),
+                            order.getOrderId()
+                    ));
+                }
             }
         } else {
             // INTRADAY
-            if (order.getSide() == TransactionSide.BUY) {
-                // Deduct charges immediately from ledger
-                client.debitCash(charges.getTotalCharges());
+            // Deduct statutory charges immediately from cash ledger
+            client.debitCash(charges.getTotalCharges());
+            String entryId = ledgerRepository.nextEntryId();
+            String entryType = order.getSide() == TransactionSide.BUY ? "INTRADAY_BUY_CHARGES" : "INTRADAY_SELL_CHARGES";
+            ledgerRepository.save(new LedgerEntry(
+                    entryId, order.getTimestamp(), tradeDate, client.getClientId(), entryType,
+                    charges.getTotalCharges(), BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP), client.getCashBalance(),
+                    String.format("INTRADAY %s %d %s @ %s charges", order.getSide(), order.getQuantity(), order.getSymbol(), order.getPrice()),
+                    order.getOrderId()
+            ));
 
-                LedgerEntry entry = new LedgerEntry(
-                        entryId,
-                        order.getTimestamp(),
-                        tradeDate,
-                        client.getClientId(),
-                        "INTRADAY_BUY_CHARGES",
-                        charges.getTotalCharges(),
-                        BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
-                        client.getCashBalance(),
-                        String.format("INTRADAY BUY %d %s @ %s charges",
-                                order.getQuantity(), order.getSymbol(), order.getPrice()),
-                        order.getOrderId()
-                );
-                ledgerRepository.save(entry);
-
-            } else {
-                // INTRADAY SELL
-                client.debitCash(charges.getTotalCharges());
-
-                LedgerEntry entry = new LedgerEntry(
-                        entryId,
-                        order.getTimestamp(),
-                        tradeDate,
-                        client.getClientId(),
-                        "INTRADAY_SELL_CHARGES",
-                        charges.getTotalCharges(),
-                        BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP),
-                        client.getCashBalance(),
-                        String.format("INTRADAY SELL %d %s @ %s charges",
-                                order.getQuantity(), order.getSymbol(), order.getPrice()),
-                        order.getOrderId()
-                );
-                ledgerRepository.save(entry);
+            // Record into Intraday position manager
+            if (intradayService != null) {
+                intradayService.recordIntradayOrder(order);
             }
         }
     }
@@ -244,10 +223,11 @@ public class OrderExecutionService {
 
     /**
      * Executes PLEDGE request.
+     * Checks holiday validation (EC-07).
      * Charges Rs 20 pledge processing fee on success.
      */
     public boolean executePledge(String requestId, LocalDateTime timestamp, String clientId, String symbol, int quantity) {
-        ValidationResult val = orderValidationService.validatePledge(clientId, symbol, quantity);
+        ValidationResult val = orderValidationService.validatePledge(clientId, symbol, quantity, timestamp.toLocalDate());
         Client client = clientRepository.findById(clientId).orElse(null);
 
         BigDecimal availableMargin = client != null
@@ -276,7 +256,7 @@ public class OrderExecutionService {
         // Apply pledge
         client.pledgeShares(symbol, quantity);
 
-        // Rs 20 pledge charge
+        // Rs 20 pledge fee
         BigDecimal pledgeFee = new BigDecimal("20.00");
         client.debitCash(pledgeFee);
         LedgerEntry entry = new LedgerEntry(

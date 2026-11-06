@@ -98,13 +98,15 @@ public class Main {
 
             engine.getReportService().writeOrderDecisionsCsv(outputDir.resolve("order_decisions.csv"));
             engine.getReportService().writeContractNotesCsv(outputDir.resolve("contract_notes.csv"));
+            engine.getReportService().writeEodReportCsv(outputDir.resolve("eod_report.csv"));
             engine.getReportService().writeHoldingsReportCsv(outputDir.resolve("holdings_report.csv"), engine.getCurrentDate());
 
             System.out.println("All commands processed successfully.");
             System.out.println("Generated evaluation CSV reports in " + outputDir.toAbsolutePath());
             System.out.println("  1. " + outputDir.resolve("order_decisions.csv"));
             System.out.println("  2. " + outputDir.resolve("contract_notes.csv"));
-            System.out.println("  3. " + outputDir.resolve("holdings_report.csv"));
+            System.out.println("  3. " + outputDir.resolve("eod_report.csv"));
+            System.out.println("  4. " + outputDir.resolve("holdings_report.csv"));
 
         } catch (Exception e) {
             System.err.println("Error executing command stream: " + e.getMessage());

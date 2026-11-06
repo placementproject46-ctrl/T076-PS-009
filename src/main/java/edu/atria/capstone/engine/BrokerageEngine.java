@@ -33,14 +33,30 @@ public class BrokerageEngine {
     private final ReportService reportService;
     private final CsvDataLoader dataLoader;
 
+    // Week 3 Specialized Engines
+    private final SettlementService settlementService;
+    private final IntradayService intradayService;
+    private final InterestCalculationService interestService;
+    private final AuctionSettlementService auctionService;
+    private final InputValidationService inputValidationService;
+
     private LocalDate currentDate = LocalDate.of(2026, 10, 1);
 
     public BrokerageEngine() {
         this.marginService = new MarginService(scripRepository, stockPriceRepository);
+        this.settlementService = new SettlementService(clientRepository, holidayRepository, ledgerRepository);
+        this.intradayService = new IntradayService(clientRepository, stockPriceRepository, orderRepository, ledgerRepository, chargeCalculationService, marginService);
+        this.interestService = new InterestCalculationService(clientRepository, ledgerRepository);
+        this.auctionService = new AuctionSettlementService(clientRepository, stockPriceRepository, ledgerRepository);
+        this.inputValidationService = new InputValidationService(clientRepository, scripRepository, holidayRepository);
+
         this.orderValidationService = new OrderValidationService(
-                clientRepository, scripRepository, stockPriceRepository, marginService, chargeCalculationService);
+                clientRepository, scripRepository, stockPriceRepository, holidayRepository, marginService, chargeCalculationService, settlementService);
         this.orderExecutionService = new OrderExecutionService(
                 clientRepository, orderRepository, ledgerRepository, chargeCalculationService, marginService, orderValidationService);
+        this.orderExecutionService.setSettlementService(settlementService);
+        this.orderExecutionService.setIntradayService(intradayService);
+
         this.reportService = new ReportService(
                 clientRepository, orderRepository, ledgerRepository, stockPriceRepository, marginService);
         this.dataLoader = new CsvDataLoader(
@@ -95,6 +111,26 @@ public class BrokerageEngine {
         return dataLoader;
     }
 
+    public SettlementService getSettlementService() {
+        return settlementService;
+    }
+
+    public IntradayService getIntradayService() {
+        return intradayService;
+    }
+
+    public InterestCalculationService getInterestService() {
+        return interestService;
+    }
+
+    public AuctionSettlementService getAuctionService() {
+        return auctionService;
+    }
+
+    public InputValidationService getInputValidationService() {
+        return inputValidationService;
+    }
+
     public LocalDate getCurrentDate() {
         return currentDate;
     }
@@ -104,12 +140,19 @@ public class BrokerageEngine {
     }
 
     /**
-     * Executes a command string.
+     * Executes a command string with input validation.
      */
     public void executeCommand(String commandLine) {
         if (commandLine == null) return;
         String line = commandLine.trim();
         if (line.isEmpty() || line.startsWith("#")) return;
+
+        // Phase 3: Input validation check before execution
+        ValidationResult valRes = inputValidationService.validateCommandLine(line);
+        if (!valRes.isValid()) {
+            System.err.println("Input validation rejection: " + valRes.getCombinedMessage());
+            return;
+        }
 
         String[] tokens = line.split("\\|", -1);
         String cmd = tokens[0].trim().toUpperCase();
@@ -130,7 +173,6 @@ public class BrokerageEngine {
     }
 
     private void handleOrderCommand(String[] tokens) {
-        // ORDER|order_id|timestamp|client_id|symbol|side|product|quantity|price
         if (tokens.length < 9) return;
         String orderId = tokens[1].trim();
         LocalDateTime ts = LocalDateTime.parse(tokens[2].trim(), TIMESTAMP_FORMATTER);
@@ -148,7 +190,6 @@ public class BrokerageEngine {
     }
 
     private void handlePledgeCommand(String[] tokens) {
-        // PLEDGE|request_id|timestamp|client_id|symbol|quantity
         if (tokens.length < 6) return;
         String reqId = tokens[1].trim();
         LocalDateTime ts = LocalDateTime.parse(tokens[2].trim(), TIMESTAMP_FORMATTER);
@@ -161,7 +202,6 @@ public class BrokerageEngine {
     }
 
     private void handleUnpledgeCommand(String[] tokens) {
-        // UNPLEDGE|request_id|timestamp|client_id|symbol|quantity
         if (tokens.length < 6) return;
         String reqId = tokens[1].trim();
         LocalDateTime ts = LocalDateTime.parse(tokens[2].trim(), TIMESTAMP_FORMATTER);
@@ -174,7 +214,6 @@ public class BrokerageEngine {
     }
 
     private void handleFundsInCommand(String[] tokens) {
-        // FUNDS_IN|request_id|timestamp|client_id|amount
         if (tokens.length < 5) return;
         String reqId = tokens[1].trim();
         LocalDateTime ts = LocalDateTime.parse(tokens[2].trim(), TIMESTAMP_FORMATTER);
@@ -186,7 +225,6 @@ public class BrokerageEngine {
     }
 
     private void handleRetagCommand(String[] tokens) {
-        // RETAG|timestamp|symbol|new_group
         if (tokens.length < 4) return;
         String symbol = tokens[2].trim().toUpperCase();
         PledgeGroup newGroup = PledgeGroup.fromString(tokens[3].trim());
@@ -194,35 +232,75 @@ public class BrokerageEngine {
     }
 
     private void handlePriceUpdateCommand(String[] tokens) {
-        // PRICE_UPDATE|timestamp|symbol|price
         if (tokens.length < 4) return;
+        LocalDateTime ts = LocalDateTime.parse(tokens[1].trim(), TIMESTAMP_FORMATTER);
         String symbol = tokens[2].trim().toUpperCase();
         BigDecimal price = new BigDecimal(tokens[3].trim()).setScale(2, RoundingMode.HALF_UP);
+
+        this.currentDate = ts.toLocalDate();
         stockPriceRepository.updateIntradayPrice(symbol, price);
+
+        // Real-time MTM evaluation & margin call check
+        intradayService.evaluateMtmAndSquareOff(symbol, price, ts);
     }
 
     private void handleSettleCommand(String[] tokens) {
-        // SETTLE|date
         if (tokens.length < 2) return;
         LocalDate date = LocalDate.parse(tokens[1].trim());
         this.currentDate = date;
+
+        // Settle all T+1 delivery obligations falling on this date
+        settlementService.executeSettlement(date);
     }
 
     private void handleSquareOffCommand(String[] tokens) {
-        // INTRADAY_SQUARE_OFF|timestamp
+        if (tokens.length < 2) return;
+        LocalDateTime ts = LocalDateTime.parse(tokens[1].trim(), TIMESTAMP_FORMATTER);
+        this.currentDate = ts.toLocalDate();
+
+        // 15:20 Auto square-off on open intraday positions with Rs 50 penalty
+        intradayService.executeIntradayAutoSquareOff(ts);
         stockPriceRepository.clearIntradayPrices();
     }
 
     private void handleEodCommand(String[] tokens) {
-        // EOD|date
         if (tokens.length < 2) return;
         LocalDate date = LocalDate.parse(tokens[1].trim());
         this.currentDate = date;
+
+        // Perform EOD processing for every registered client
+        for (Client client : clientRepository.findAll()) {
+            String clientId = client.getClientId();
+
+            // 1. Negative ledger balance interest (0.05% starting from next day)
+            BigDecimal interestCharged = interestService.calculateAndApplyDailyInterest(clientId, date);
+
+            // 2. Compute EOD metrics
+            BigDecimal ledgerBalance = client.getCashBalance();
+            BigDecimal collateralValue = marginService.calculateCollateralValue(client, date);
+            BigDecimal intradayMtm = intradayService.calculateClientTotalMtm(clientId, date);
+            BigDecimal usedMargin = intradayService.calculateClientTotalRequiredMargin(clientId, date);
+            BigDecimal usableMargin = marginService.calculateAvailableMargin(client, date, ProductType.INTRADAY, usedMargin);
+            int openPositions = intradayService.getOpenPositionCount(clientId);
+
+            EodRecord eodRecord = new EodRecord(
+                    date,
+                    clientId,
+                    ledgerBalance,
+                    collateralValue,
+                    intradayMtm,
+                    usableMargin,
+                    usedMargin,
+                    interestCharged,
+                    openPositions
+            );
+            reportService.addEodRecord(eodRecord);
+        }
+
         stockPriceRepository.clearIntradayPrices();
     }
 
     private void handlePrintReportCommand(String[] tokens) {
-        // PRINT_REPORT|client_id|date
         if (tokens.length < 3) return;
         String clientId = tokens[1].trim();
         LocalDate date = LocalDate.parse(tokens[2].trim());

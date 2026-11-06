@@ -59,7 +59,7 @@ class MarginServiceTest {
     }
 
     @Test
-    @DisplayName("Collateral valuation applies correct haircut rates for GROUP_A (10%), GROUP_B (20%) and GROUP_C (100%)")
+    @DisplayName("Collateral valuation applies correct haircut rates for GROUP_A (10%), GROUP_B (25%) and GROUP_C (100%)")
     void testCollateralValuationWithHaircuts() {
         LocalDate date = LocalDate.of(2026, 10, 1);
         stockPriceRepository.save(date, "SAHYADRI", new BigDecimal("2000.00"));
@@ -71,15 +71,15 @@ class MarginServiceTest {
         // 100 SAHYADRI pledged @ 2000 = 2,00,000 * 90% (GROUP_A) = 1,80,000
         client.addOrUpdateHolding("SAHYADRI", 100, 100, new BigDecimal("2000.00"));
 
-        // 200 HAMPISTL pledged @ 500 = 1,00,000 * 80% (GROUP_B) = 80,000
+        // 200 HAMPISTL pledged @ 500 = 1,00,000 * 75% (GROUP_B, 25% haircut) = 75,000
         client.addOrUpdateHolding("HAMPISTL", 200, 200, new BigDecimal("500.00"));
 
         // 500 BIDARCHEM pledged @ 60 = 30,000 * 0% (GROUP_C, not pledgeable) = 0
         client.addOrUpdateHolding("BIDARCHEM", 500, 500, new BigDecimal("60.00"));
 
         BigDecimal totalCollateral = marginService.calculateCollateralValue(client, date);
-        // 1,80,000 + 80,000 + 0 = 2,60,000
-        assertEquals(new BigDecimal("260000.00"), totalCollateral);
+        // 1,80,000 + 75,000 + 0 = 2,55,000
+        assertEquals(new BigDecimal("255000.00"), totalCollateral);
     }
 
     @Test

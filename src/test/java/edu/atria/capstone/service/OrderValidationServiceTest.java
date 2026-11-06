@@ -199,7 +199,7 @@ class OrderValidationServiceTest {
         // Check that BOTH rule IDs are reported!
         assertTrue(ruleIds.contains(OrderValidationService.BR_VAL_HOLDINGS_FREE), "Must contain BR_VAL_006");
         assertTrue(ruleIds.contains(OrderValidationService.BR_VAL_PRICE_BAND), "Must contain BR_VAL_007");
-        assertEquals("BR_VAL_007;BR_VAL_006", ruleIds);
+        assertEquals("BR_VAL_006;BR_VAL_007", ruleIds);
     }
 
     @Test
